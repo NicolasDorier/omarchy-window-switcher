@@ -3,6 +3,8 @@
 A Windows-style MRU Alt-Tab switcher with a passive, theme-aware Omarchy
 overlay.
 
+Its intent is to replicate the Alt-Tab behavior of Windows.
+
 The switcher freezes the current window history when Alt-Tab starts, previews
 each selection immediately, and promotes only the final selection when Alt is
 released. Alt-Shift-Tab cycles in reverse.
