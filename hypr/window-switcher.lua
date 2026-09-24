@@ -32,6 +32,53 @@ local function get_window(address)
 	end
 end
 
+local function window_has_tag(window, expected)
+	for _, tag in ipairs(window.tags or {}) do
+		if tag:gsub("%*$", "") == expected then
+			return true
+		end
+	end
+
+	return false
+end
+
+local function workspace_selector(workspace)
+	if workspace.name:match("^%d+$") or workspace.name:match("^special:") then
+		return workspace.name
+	end
+
+	return "name:" .. workspace.name
+end
+
+local function workspace_is_active(workspace)
+	local active = hl.get_active_workspace()
+	if active and active.id == workspace.id then
+		return true
+	end
+
+	local active_special = hl.get_active_special_workspace()
+	return active_special and active_special.id == workspace.id
+end
+
+local function floating_terminal_home(workspace)
+	local home_id = workspace.name:match("^special:floating%-terminal%-(%-?%d+)$")
+	return home_id and hl.get_workspace(tonumber(home_id)) or nil
+end
+
+local function hide_floating_terminal(workspace)
+	for _, window in ipairs(hl.get_workspace_windows(workspace)) do
+		if window_has_tag(window, "floating-terminal") then
+			local group_window = window.group and window.group.current or window
+			hl.dispatch(hl.dsp.window.move({
+				window = group_window,
+				workspace = "special:floating-terminal-" .. tostring(workspace.id),
+				follow = false,
+			}))
+			return
+		end
+	end
+end
+
 local function json_string(value)
 	local escapes = {
 		['"'] = '\\"',
@@ -145,6 +192,23 @@ local function focus_alt_tab_selection()
 	while alt_tab_history and #alt_tab_history > 0 do
 		local selected = get_window(alt_tab_history[alt_tab_index])
 		if selected then
+			local workspace = selected.workspace
+			local home_workspace = workspace and floating_terminal_home(workspace)
+			if home_workspace then
+				local group_window = selected.group and selected.group.current or selected
+				hl.dispatch(hl.dsp.window.move({
+					window = group_window,
+					workspace = workspace_selector(home_workspace),
+					follow = true,
+				}))
+			elseif workspace then
+				if not window_has_tag(selected, "floating-terminal") then
+					hide_floating_terminal(workspace)
+				end
+				if not workspace_is_active(workspace) then
+					hl.dispatch(hl.dsp.focus({ workspace = workspace_selector(workspace) }))
+				end
+			end
 			hl.dispatch(hl.dsp.focus({ window = "address:" .. selected.address }))
 			hl.dispatch(hl.dsp.window.bring_to_top())
 			return selected

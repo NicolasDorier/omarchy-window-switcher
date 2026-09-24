@@ -11,6 +11,13 @@ the active window first. Regular Alt-Tab selects the second entry, while
 Alt-Shift-Tab starts from the end. Releasing Alt promotes only the final
 selection while preserving the relative order of every other window.
 
+Workspace-local floating terminals stored on a `special:floating-terminal-ID`
+workspace are restored to their encoded home workspace when previewed. This
+prevents a hidden terminal from opening as a special-workspace overlay on top
+of the previously previewed workspace. Selecting another window on a workspace
+where its floating terminal is visible moves the terminal group back to that
+special workspace before focusing the selected window.
+
 ## Runtime State
 
 The Lua code writes the current selection to:
