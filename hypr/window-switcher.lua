@@ -1,391 +1,398 @@
-hl.unbind("ALT + TAB")
-hl.unbind("ALT + SHIFT + TAB")
+local M = {}
 
-local alt_tab_order
-local alt_tab_history
-local alt_tab_index
-local alt_tab_direction
-local alt_tab_monitor
-local alt_tab_origin_address
-local alt_tab_focus_generation = 0
-local alt_keys_down = {}
-local alt_tab_state_path = (os.getenv("XDG_RUNTIME_DIR") or "/tmp") .. "/omarchy-window-switcher.json"
+function M.setup(options)
+	options = options or {}
+	local prepare_focus = options.prepare_focus or function(window, callback)
+		callback(true, window)
+	end
 
-local function remove_address(list, address)
-	for index, candidate in ipairs(list or {}) do
-		if candidate == address then
-			table.remove(list, index)
-			return index
+	hl.unbind("ALT + TAB")
+	hl.unbind("ALT + SHIFT + TAB")
+
+	local LEFT_ALT = 64
+	local RIGHT_ALT = 108
+	local order = {}
+	local session
+	local alt_origin_address
+	local preparation_active = false
+	local queued_focus
+	local finalizing = false
+	local alt_keys_down = {}
+	local state_path = (os.getenv("XDG_RUNTIME_DIR") or "/tmp") .. "/omarchy-window-switcher.json"
+
+	local function remove_address(list, address)
+		for index, candidate in ipairs(list or {}) do
+			if candidate == address then
+				table.remove(list, index)
+				return index
+			end
 		end
 	end
-end
 
-local function promote(address)
-	alt_tab_order = alt_tab_order or {}
-	remove_address(alt_tab_order, address)
-	table.insert(alt_tab_order, 1, address)
-end
-
-local function get_window(address)
-	local window = hl.get_window("address:" .. address)
-	if window and window.mapped then
-		return window
+	local function promote(address)
+		remove_address(order, address)
+		table.insert(order, 1, address)
 	end
-end
 
-local function window_has_tag(window, expected)
-	for _, tag in ipairs(window.tags or {}) do
-		if tag:gsub("%*$", "") == expected then
+	local function get_window(address)
+		local window = address and hl.get_window("address:" .. address) or nil
+		if window and window.mapped then
+			return window
+		end
+	end
+
+	local function workspace_selector(workspace)
+		if workspace.name:match("^%d+$") or workspace.name:match("^special:") then
+			return workspace.name
+		end
+
+		return "name:" .. workspace.name
+	end
+
+	local function workspace_is_active(workspace)
+		local active = hl.get_active_workspace()
+		if active and active.id == workspace.id then
 			return true
 		end
+
+		local active_special = hl.get_active_special_workspace()
+		return active_special and active_special.id == workspace.id
 	end
 
-	return false
-end
-
-local function workspace_selector(workspace)
-	if workspace.name:match("^%d+$") or workspace.name:match("^special:") then
-		return workspace.name
+	local function json_string(value)
+		local escapes = {
+			['"'] = '\\"',
+			["\\"] = "\\\\",
+			["\b"] = "\\b",
+			["\f"] = "\\f",
+			["\n"] = "\\n",
+			["\r"] = "\\r",
+			["\t"] = "\\t",
+		}
+		return '"'
+			.. tostring(value or ""):gsub('[%z\1-\31\\"]', function(character)
+				return escapes[character] or string.format("\\u%04x", string.byte(character))
+			end)
+			.. '"'
 	end
 
-	return "name:" .. workspace.name
-end
-
-local function workspace_is_active(workspace)
-	local active = hl.get_active_workspace()
-	if active and active.id == workspace.id then
-		return true
-	end
-
-	local active_special = hl.get_active_special_workspace()
-	return active_special and active_special.id == workspace.id
-end
-
-local function floating_terminal_home(workspace)
-	local home_id = workspace.name:match("^special:floating%-terminal%-(%-?%d+)$")
-	if not home_id then
-		return nil
-	end
-
-	local numeric_id = tonumber(home_id)
-	local home = hl.get_workspace(numeric_id)
-	if home then
-		return home
-	end
-
-	-- Empty numbered workspaces cease to exist, but focusing the encoded number
-	-- recreates them. Negative IDs belong to named or special workspaces and
-	-- cannot be reconstructed safely without their original name.
-	if numeric_id > 0 then
-		return { id = numeric_id, name = home_id }
-	end
-
-	return nil
-end
-
-local function hide_floating_terminal(workspace)
-	for _, window in ipairs(hl.get_workspace_windows(workspace)) do
-		if window_has_tag(window, "floating-terminal") then
-			local group_window = window.group and window.group.current or window
-			hl.dispatch(hl.dsp.window.move({
-				window = group_window,
-				workspace = "special:floating-terminal-" .. tostring(workspace.id),
-				follow = false,
-			}))
-			return
-		end
-	end
-end
-
-local function json_string(value)
-	local escapes = {
-		['"'] = '\\"',
-		["\\"] = "\\\\",
-		["\b"] = "\\b",
-		["\f"] = "\\f",
-		["\n"] = "\\n",
-		["\r"] = "\\r",
-		["\t"] = "\\t",
-	}
-	return '"'
-		.. tostring(value or ""):gsub('[%z\1-\31\\"]', function(character)
-			return escapes[character] or string.format("\\u%04x", string.byte(character))
+	local function write_state(content)
+		pcall(function()
+			local file = io.open(state_path, "w")
+			if file then
+				file:write(content, "\n")
+				file:close()
+			end
 		end)
-		.. '"'
-end
-
-local function write_alt_tab_state(content)
-	pcall(function()
-		local file = io.open(alt_tab_state_path, "w")
-		if file then
-			file:write(content, "\n")
-			file:close()
-		end
-	end)
-end
-
-local function close_alt_tab_overlay()
-	write_alt_tab_state('{"version":1,"open":false}')
-end
-
-local function publish_alt_tab_overlay()
-	if not alt_tab_history or not alt_tab_index then
-		close_alt_tab_overlay()
-		return
 	end
 
-	local rows = {}
-	local selected_index = 0
-	for index, address in ipairs(alt_tab_history) do
-		local window = get_window(address)
-		if window then
-			local workspace = window.workspace
-			table.insert(
-				rows,
-				'{"title":'
-					.. json_string(window.title)
-					.. ',"className":'
-					.. json_string(window.class)
-					.. ',"workspace":'
-					.. json_string(workspace and workspace.name or "?")
-					.. "}"
-			)
-			if index == alt_tab_index then
-				selected_index = #rows - 1
-			end
-		end
+	local function close_overlay()
+		write_state('{"version":1,"open":false}')
 	end
 
-	if #rows == 0 then
-		close_alt_tab_overlay()
-		return
-	end
-
-	write_alt_tab_state(
-		'{"version":1,"open":true,"monitor":'
-			.. json_string(alt_tab_monitor)
-			.. ',"selected":'
-			.. selected_index
-			.. ',"windows":['
-			.. table.concat(rows, ",")
-			.. "]}"
-	)
-end
-
-local function safely_publish_alt_tab_overlay()
-	pcall(publish_alt_tab_overlay)
-end
-
-local function focus_after_workspace_move(address, workspace_id, generation)
-	local attempts = 0
-	local timer
-	timer = hl.timer(function()
-		attempts = attempts + 1
-		if generation ~= alt_tab_focus_generation or attempts >= 20 then
-			timer:set_enabled(false)
+	local function publish_overlay()
+		if not session then
+			close_overlay()
 			return
 		end
 
-		local window = get_window(address)
-		if not window or not window.workspace or window.workspace.id ~= workspace_id then
+		local rows = {}
+		local selected_index = 0
+		for index, address in ipairs(session.history) do
+			local window = get_window(address)
+			if window then
+				table.insert(
+					rows,
+					'{"title":' .. json_string(window.title) .. ',"className":' .. json_string(window.class) .. "}"
+				)
+				if index == session.index then
+					selected_index = #rows - 1
+				end
+			end
+		end
+
+		if #rows == 0 then
+			close_overlay()
 			return
 		end
 
-		hl.dispatch(hl.dsp.focus({ window = "address:" .. address }))
-		hl.dispatch(hl.dsp.window.bring_to_top())
-		timer:set_enabled(false)
-	end, { timeout = 50, type = "repeat" })
-end
-
-close_alt_tab_overlay()
-
-local function sync_alt_tab_order()
-	local windows = hl.get_windows({ mapped = true })
-	table.sort(windows, function(left, right)
-		return left.focus_history_id < right.focus_history_id
-	end)
-
-	local eligible = {}
-	for _, window in ipairs(windows) do
-		if window.focus_history_id >= 0 then
-			eligible[window.address] = true
-		end
+		write_state(
+			'{"version":1,"open":true,"monitor":'
+				.. json_string(session.monitor)
+				.. ',"selected":'
+				.. selected_index
+				.. ',"windows":['
+				.. table.concat(rows, ",")
+				.. "]}"
+		)
 	end
 
-	local synced = {}
-	for _, address in ipairs(alt_tab_order or {}) do
-		if eligible[address] then
-			table.insert(synced, address)
-			eligible[address] = nil
-		end
+	local function safely_publish_overlay()
+		pcall(publish_overlay)
 	end
-	for _, window in ipairs(windows) do
-		if eligible[window.address] then
-			table.insert(synced, window.address)
-		end
-	end
-	alt_tab_order = synced
-end
 
-local function focus_alt_tab_selection()
-	alt_tab_focus_generation = alt_tab_focus_generation + 1
-	local focus_generation = alt_tab_focus_generation
+	local function sync_order()
+		local windows = hl.get_windows({ mapped = true })
+		table.sort(windows, function(left, right)
+			return left.focus_history_id < right.focus_history_id
+		end)
 
-	while alt_tab_history and #alt_tab_history > 0 do
-		local selected = get_window(alt_tab_history[alt_tab_index])
-		if selected then
-			local workspace = selected.workspace
-			local home_workspace = workspace and floating_terminal_home(workspace)
-			if home_workspace then
-				local group_window = selected.group and selected.group.current or selected
-				hl.dispatch(hl.dsp.window.move({
-					window = group_window,
-					workspace = workspace_selector(home_workspace),
-					follow = false,
-				}))
-				focus_after_workspace_move(selected.address, home_workspace.id, focus_generation)
-			elseif workspace then
-				if not window_has_tag(selected, "floating-terminal") then
-					hide_floating_terminal(workspace)
-				end
-				if not workspace_is_active(workspace) then
-					hl.dispatch(hl.dsp.focus({ workspace = workspace_selector(workspace) }))
-				end
-				hl.dispatch(hl.dsp.focus({ window = "address:" .. selected.address }))
-				hl.dispatch(hl.dsp.window.bring_to_top())
+		local eligible = {}
+		for _, window in ipairs(windows) do
+			if window.focus_history_id >= 0 then
+				eligible[window.address] = true
 			end
-			return selected
 		end
 
-		table.remove(alt_tab_history, alt_tab_index)
-		if #alt_tab_history == 0 then
-			return
-		elseif alt_tab_direction == 1 then
-			alt_tab_index = ((alt_tab_index - 1) % #alt_tab_history) + 1
-		else
-			alt_tab_index = ((alt_tab_index - 2) % #alt_tab_history) + 1
-		end
-	end
-end
-
-local function end_alt_tab()
-	if not alt_tab_history then
-		return
-	end
-
-	local selected = focus_alt_tab_selection()
-	if selected then
-		promote(selected.address)
-	end
-	close_alt_tab_overlay()
-
-	alt_tab_history = nil
-	alt_tab_index = nil
-	alt_tab_direction = nil
-	alt_tab_monitor = nil
-	alt_tab_origin_address = nil
-end
-
-local function switch_by_history(direction)
-	if not alt_tab_history then
-		sync_alt_tab_order()
-		local active = alt_tab_origin_address and get_window(alt_tab_origin_address) or hl.get_active_window()
-		if not active then
-			if #alt_tab_order == 0 then
-				return
+		local synced = {}
+		for _, address in ipairs(order) do
+			if eligible[address] then
+				table.insert(synced, address)
+				eligible[address] = nil
 			end
-
-			alt_tab_history = { table.unpack(alt_tab_order) }
-			alt_tab_index = direction == 1 and 1 or #alt_tab_history
-			local monitor = hl.get_active_monitor()
-			alt_tab_monitor = monitor and monitor.name or ""
-		else
-			promote(active.address)
-
-			if #alt_tab_order < 2 then
-				return
-			end
-
-			alt_tab_history = { active.address }
-			for _, address in ipairs(alt_tab_order) do
-				if address ~= active.address then
-					table.insert(alt_tab_history, address)
-				end
-			end
-			alt_tab_index = direction == 1 and 2 or #alt_tab_history
-			local monitor = active.monitor or hl.get_active_monitor()
-			alt_tab_monitor = monitor and monitor.name or ""
 		end
-	else
-		alt_tab_index = ((alt_tab_index - 1 + direction) % #alt_tab_history) + 1
-	end
-
-	alt_tab_direction = direction
-	focus_alt_tab_selection()
-	safely_publish_alt_tab_overlay()
-end
-
-o.bind("ALT + TAB", "Cycle windows by recent use", function()
-	switch_by_history(1)
-end)
-o.bind("ALT + SHIFT + TAB", "Cycle windows by recent use in reverse", function()
-	switch_by_history(-1)
-end)
-
-hl.on("window.active", function(window)
-	if not alt_tab_history and window then
-		promote(window.address)
-	end
-end)
-
-hl.on("window.close", function(window)
-	local address = window.address
-	remove_address(alt_tab_order, address)
-
-	if not alt_tab_history then
-		return
-	end
-
-	local removed_index = remove_address(alt_tab_history, address)
-	if not removed_index then
-		return
-	end
-
-	if #alt_tab_history == 0 then
-		close_alt_tab_overlay()
-		alt_tab_history = nil
-		alt_tab_index = nil
-		alt_tab_direction = nil
-		alt_tab_monitor = nil
-	elseif removed_index < alt_tab_index then
-		alt_tab_index = alt_tab_index - 1
-		safely_publish_alt_tab_overlay()
-	elseif removed_index == alt_tab_index then
-		if alt_tab_direction == 1 then
-			alt_tab_index = ((alt_tab_index - 1) % #alt_tab_history) + 1
-		else
-			alt_tab_index = ((alt_tab_index - 2) % #alt_tab_history) + 1
+		for _, window in ipairs(windows) do
+			if eligible[window.address] then
+				table.insert(synced, window.address)
+			end
 		end
-		hl.timer(function()
-			focus_alt_tab_selection()
-			safely_publish_alt_tab_overlay()
-		end, { timeout = 1, type = "oneshot" })
-	else
-		safely_publish_alt_tab_overlay()
+		order = synced
 	end
-end)
 
--- Raw key releases reliably end the session even when ALT+TAB consumed the keypress.
-hl.on("input.keyboard.key", function(keycode, _, state)
-	if keycode == 64 or keycode == 108 then
-		if state ~= 0 and not alt_keys_down[64] and not alt_keys_down[108] then
+	local run_focus_request
+
+	local function finish_focus_request(request, success)
+		preparation_active = false
+		if request.completed then
+			request.completed(success)
+		end
+
+		local next_request = queued_focus
+		queued_focus = nil
+		if next_request then
+			run_focus_request(next_request)
+		end
+	end
+
+	local function wait_for_focus(request)
+		local attempts = 0
+		local timer
+		timer = hl.timer(function()
+			attempts = attempts + 1
 			local active = hl.get_active_window()
-			alt_tab_origin_address = active and active.address or nil
+			if active and active.address == request.address then
+				timer:set_enabled(false)
+				finish_focus_request(request, true)
+			elseif attempts >= 20 or not get_window(request.address) then
+				timer:set_enabled(false)
+				finish_focus_request(request, false)
+			end
+		end, { timeout = 50, type = "repeat" })
+	end
+
+	run_focus_request = function(request)
+		preparation_active = true
+		local selected = get_window(request.address)
+		if not selected then
+			finish_focus_request(request, false)
+			return
 		end
-		alt_keys_down[keycode] = state ~= 0
-		if state == 0 and not alt_keys_down[64] and not alt_keys_down[108] then
-			end_alt_tab()
-			alt_tab_origin_address = nil
+
+		prepare_focus(selected, function(ready)
+			if not ready then
+				finish_focus_request(request, false)
+				return
+			end
+
+			local current = get_window(request.address)
+			if not current or not current.workspace then
+				finish_focus_request(request, false)
+				return
+			end
+
+			if not workspace_is_active(current.workspace) then
+				hl.dispatch(hl.dsp.focus({ workspace = workspace_selector(current.workspace) }))
+			end
+			hl.dispatch(hl.dsp.focus({ window = current }))
+			hl.dispatch(hl.dsp.window.bring_to_top())
+			wait_for_focus(request)
+		end)
+	end
+
+	local function request_focus(window, completed)
+		local request = { address = window.address, completed = completed }
+		if preparation_active then
+			queued_focus = request
+		else
+			run_focus_request(request)
 		end
 	end
-end)
+
+	local function focus_selection(current_session, completed)
+
+		while #current_session.history > 0 do
+			local selected = get_window(current_session.history[current_session.index])
+			if selected then
+				request_focus(selected, completed)
+				return selected
+			end
+
+			table.remove(current_session.history, current_session.index)
+			if #current_session.history == 0 then
+				return
+			elseif current_session.direction == 1 then
+				current_session.index = ((current_session.index - 1) % #current_session.history) + 1
+			else
+				current_session.index = ((current_session.index - 2) % #current_session.history) + 1
+			end
+		end
+	end
+
+	local function begin_session(direction)
+		sync_order()
+		local active = get_window(alt_origin_address) or hl.get_active_window()
+		if active then
+			promote(active.address)
+			if #order < 2 then
+				return nil
+			end
+
+			local history = { active.address }
+			for _, address in ipairs(order) do
+				if address ~= active.address then
+					table.insert(history, address)
+				end
+			end
+			local monitor = active.monitor or hl.get_active_monitor()
+			return {
+				history = history,
+				index = direction == 1 and 2 or #history,
+				direction = direction,
+				monitor = monitor and monitor.name or "",
+				origin = active.address,
+			}
+		end
+
+		if #order == 0 then
+			return nil
+		end
+
+		local monitor = hl.get_active_monitor()
+		return {
+			history = { table.unpack(order) },
+			index = direction == 1 and 1 or #order,
+			direction = direction,
+			monitor = monitor and monitor.name or "",
+			origin = nil,
+		}
+	end
+
+	local function switch_by_history(direction)
+		if finalizing then
+			return
+		end
+
+		if not session then
+			session = begin_session(direction)
+			if not session then
+				return
+			end
+		else
+			session.index = ((session.index - 1 + direction) % #session.history) + 1
+			session.direction = direction
+		end
+
+		focus_selection(session)
+		safely_publish_overlay()
+	end
+
+	local function end_session()
+		if not session then
+			return
+		end
+
+		local completed = session
+		finalizing = true
+		local selected_address
+		local selected = focus_selection(completed, function(success)
+			if success and selected_address then
+				promote(selected_address)
+			end
+			finalizing = false
+		end)
+		selected_address = selected and selected.address or nil
+		if not selected then
+			finalizing = false
+		end
+		session = nil
+		close_overlay()
+	end
+
+	close_overlay()
+
+	o.bind("ALT + TAB", "Cycle windows by recent use", function()
+		switch_by_history(1)
+	end)
+	o.bind("ALT + SHIFT + TAB", "Cycle windows by recent use in reverse", function()
+		switch_by_history(-1)
+	end)
+
+	hl.on("window.active", function(window)
+		if not session and not preparation_active and not finalizing and window then
+			promote(window.address)
+		end
+	end)
+
+	hl.on("window.close", function(window)
+		local address = window.address
+		remove_address(order, address)
+		if not session then
+			return
+		end
+
+		local removed_index = remove_address(session.history, address)
+		if not removed_index then
+			return
+		elseif #session.history == 0 then
+			session = nil
+			close_overlay()
+		elseif removed_index < session.index then
+			session.index = session.index - 1
+			safely_publish_overlay()
+		elseif removed_index == session.index then
+			if session.direction == 1 then
+				session.index = ((session.index - 1) % #session.history) + 1
+			else
+				session.index = ((session.index - 2) % #session.history) + 1
+			end
+			local current_session = session
+			hl.timer(function()
+				if session == current_session then
+					focus_selection(current_session)
+					safely_publish_overlay()
+				end
+			end, { timeout = 1, type = "oneshot" })
+		else
+			safely_publish_overlay()
+		end
+	end)
+
+	-- Raw releases reliably end a session even when ALT+TAB consumes the keypress.
+	hl.on("input.keyboard.key", function(keycode, _, key_state)
+		if keycode ~= LEFT_ALT and keycode ~= RIGHT_ALT then
+			return
+		end
+
+		if key_state ~= 0 and not alt_keys_down[LEFT_ALT] and not alt_keys_down[RIGHT_ALT] then
+			local active = hl.get_active_window()
+			alt_origin_address = active and active.address or nil
+		end
+		alt_keys_down[keycode] = key_state ~= 0
+		if key_state == 0 and not alt_keys_down[LEFT_ALT] and not alt_keys_down[RIGHT_ALT] then
+			end_session()
+			alt_origin_address = nil
+		end
+	end)
+end
+
+return M

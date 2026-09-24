@@ -26,7 +26,16 @@ Load the switching behavior from your Hyprland Lua configuration:
 
 ```lua
 local config_home = os.getenv("XDG_CONFIG_HOME") or (os.getenv("HOME") .. "/.config")
-dofile(config_home .. "/omarchy/plugins/nicolasdorier.window-switcher/hypr/window-switcher.lua")
+local window_switcher = dofile(config_home .. "/omarchy/plugins/nicolasdorier.window-switcher/hypr/window-switcher.lua")
+window_switcher.setup()
+```
+
+`setup` accepts an optional `prepare_focus(window, callback)` adapter. This lets
+another Hyprland module prepare special windows asynchronously without teaching
+the switcher about their storage or lifecycle:
+
+```lua
+window_switcher.setup({ prepare_focus = floating_terminal.prepare_focus })
 ```
 
 Reload Hyprland after adding the loader:

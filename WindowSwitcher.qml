@@ -47,6 +47,7 @@ Item {
       opened = true
     } catch (e) {
       console.warn("window-switcher", "Ignoring invalid state", e)
+      close()
     }
   }
 

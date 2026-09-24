@@ -2,21 +2,28 @@
 
 ## Components
 
-`hypr/window-switcher.lua` owns the Alt-Tab bindings, MRU history, selection,
-and focus changes. `WindowSwitcher.qml` is a passive Omarchy overlay that only
-renders state; it does not capture keyboard or pointer input.
+`hypr/window-switcher.lua` returns a module whose `setup` function owns the
+Alt-Tab bindings, MRU history, selection, and focus changes.
+`WindowSwitcher.qml` is a passive Omarchy overlay that only renders state; it
+does not capture keyboard or pointer input.
 
 When an Alt-Tab session starts, the Lua code freezes the current history with
 the active window first. Regular Alt-Tab selects the second entry, while
 Alt-Shift-Tab starts from the end. Releasing Alt promotes only the final
 selection while preserving the relative order of every other window.
 
-Workspace-local floating terminals stored on a `special:floating-terminal-ID`
-workspace are restored to their encoded home workspace when previewed. This
-prevents a hidden terminal from opening as a special-workspace overlay on top
-of the previously previewed workspace. Selecting another window on a workspace
-where its floating terminal is visible moves the terminal group back to that
-special workspace before focusing the selected window.
+One `session` table contains the frozen history, selection, direction, origin,
+and monitor. A `nil` session means Alt-Tab is inactive.
+
+The switcher has no knowledge of floating-terminal tags or parking workspaces.
+Callers can inject an asynchronous `prepare_focus(window, callback)` function
+through `setup`. The callback must receive a truthy first argument when the
+window is ready to focus. Without an adapter, preparation completes immediately.
+
+The dotfiles integration injects `floating_terminal.prepare_focus`. That module
+restores parked terminals and hides a workspace's visible terminal before a
+different window there is focused. Keeping those rules in their owning module
+prevents the switcher and terminal state machines from diverging.
 
 ## Runtime State
 
@@ -38,8 +45,7 @@ selected zero-based index, and visible windows:
   "windows": [
     {
       "title": "Terminal",
-      "className": "com.mitchellh.ghostty",
-      "workspace": "1"
+      "className": "com.mitchellh.ghostty"
     }
   ]
 }
@@ -51,9 +57,10 @@ Outside an Alt-Tab session, the file contains:
 {"version":1,"open":false}
 ```
 
-The QML `FileView` watches this file and updates the overlay on each write. The
-overlay is click-through, appears only on the origin monitor, and uses Omarchy's
-current menu colors, spacing, typography, and borders.
+The QML `FileView` watches this file and updates the overlay on each write. An
+invalid or partial document closes the overlay instead of leaving stale state
+visible. The overlay is click-through, appears only on the origin monitor, and
+uses Omarchy's current menu colors, spacing, typography, and borders.
 
 ## Window Icons
 
