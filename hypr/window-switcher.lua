@@ -7,6 +7,7 @@ local alt_tab_index
 local alt_tab_direction
 local alt_tab_monitor
 local alt_tab_origin_address
+local alt_tab_focus_generation = 0
 local alt_keys_down = {}
 local alt_tab_state_path = (os.getenv("XDG_RUNTIME_DIR") or "/tmp") .. "/omarchy-window-switcher.json"
 
@@ -62,7 +63,24 @@ end
 
 local function floating_terminal_home(workspace)
 	local home_id = workspace.name:match("^special:floating%-terminal%-(%-?%d+)$")
-	return home_id and hl.get_workspace(tonumber(home_id)) or nil
+	if not home_id then
+		return nil
+	end
+
+	local numeric_id = tonumber(home_id)
+	local home = hl.get_workspace(numeric_id)
+	if home then
+		return home
+	end
+
+	-- Empty numbered workspaces cease to exist, but focusing the encoded number
+	-- recreates them. Negative IDs belong to named or special workspaces and
+	-- cannot be reconstructed safely without their original name.
+	if numeric_id > 0 then
+		return { id = numeric_id, name = home_id }
+	end
+
+	return nil
 end
 
 local function hide_floating_terminal(workspace)
@@ -158,6 +176,27 @@ local function safely_publish_alt_tab_overlay()
 	pcall(publish_alt_tab_overlay)
 end
 
+local function focus_after_workspace_move(address, workspace_id, generation)
+	local attempts = 0
+	local timer
+	timer = hl.timer(function()
+		attempts = attempts + 1
+		if generation ~= alt_tab_focus_generation or attempts >= 20 then
+			timer:set_enabled(false)
+			return
+		end
+
+		local window = get_window(address)
+		if not window or not window.workspace or window.workspace.id ~= workspace_id then
+			return
+		end
+
+		hl.dispatch(hl.dsp.focus({ window = "address:" .. address }))
+		hl.dispatch(hl.dsp.window.bring_to_top())
+		timer:set_enabled(false)
+	end, { timeout = 50, type = "repeat" })
+end
+
 close_alt_tab_overlay()
 
 local function sync_alt_tab_order()
@@ -189,6 +228,9 @@ local function sync_alt_tab_order()
 end
 
 local function focus_alt_tab_selection()
+	alt_tab_focus_generation = alt_tab_focus_generation + 1
+	local focus_generation = alt_tab_focus_generation
+
 	while alt_tab_history and #alt_tab_history > 0 do
 		local selected = get_window(alt_tab_history[alt_tab_index])
 		if selected then
@@ -199,8 +241,9 @@ local function focus_alt_tab_selection()
 				hl.dispatch(hl.dsp.window.move({
 					window = group_window,
 					workspace = workspace_selector(home_workspace),
-					follow = true,
+					follow = false,
 				}))
+				focus_after_workspace_move(selected.address, home_workspace.id, focus_generation)
 			elseif workspace then
 				if not window_has_tag(selected, "floating-terminal") then
 					hide_floating_terminal(workspace)
@@ -208,9 +251,9 @@ local function focus_alt_tab_selection()
 				if not workspace_is_active(workspace) then
 					hl.dispatch(hl.dsp.focus({ workspace = workspace_selector(workspace) }))
 				end
+				hl.dispatch(hl.dsp.focus({ window = "address:" .. selected.address }))
+				hl.dispatch(hl.dsp.window.bring_to_top())
 			end
-			hl.dispatch(hl.dsp.focus({ window = "address:" .. selected.address }))
-			hl.dispatch(hl.dsp.window.bring_to_top())
 			return selected
 		end
 
